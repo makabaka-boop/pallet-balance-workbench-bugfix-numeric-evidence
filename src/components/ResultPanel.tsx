@@ -1,5 +1,5 @@
 import type { StabilityResult } from '../lib/types';
-import { fmt } from '../lib/form';
+import { fmt, fmtPair } from '../lib/form';
 
 interface Props {
   result: StabilityResult;
@@ -9,14 +9,49 @@ interface Props {
  * 数值结论面板。全部数值直接来自传入的 StabilityResult，
  * 与 SVG 使用同一计算结果；边界判断使用未舍入值，
  * 展示值附带 title 提供原始精度。
+ * 直接互相比较的指标成对格式化，保证舍入后仍可区分（不会出现“0 ＜ 0”）；
+ * 无法可靠表达的量（合计重量溢出、余量低于分辨极限）显式列出并阻止放行。
  */
 export default function ResultPanel({ result }: Props) {
-  const { stable, cog, totalWeight, minDistance, margin, shortfall, criticalEdge, edges } =
-    result;
+  const {
+    stable,
+    releasable,
+    warnings,
+    cog,
+    totalWeight,
+    minDistance,
+    margin,
+    shortfall,
+    criticalEdge,
+    edges,
+  } = result;
+
+  // 实际余量 / 要求余量成对展示
+  const [distText, marginText] = fmtPair(minDistance, margin);
+  const surplus = minDistance - margin;
+  // 富余/短缺与 0 成对展示，保证极小非零量不会被显示成 0
+  const [surplusOrShortText] = fmtPair(stable ? surplus : shortfall, 0);
+  const marginDisplay = marginText;
+
+  const verdictClass = !stable ? 'unstable' : releasable ? 'stable' : 'blocked';
+  const verdictText = !stable ? 'UNSTABLE' : releasable ? 'STABLE' : '暂缓放行';
 
   return (
-    <section className={`panel verdict ${stable ? 'stable' : 'unstable'}`}>
-      <div className="verdict-badge">{stable ? 'STABLE' : 'UNSTABLE'}</div>
+    <section className={`panel verdict ${verdictClass}`}>
+      <div className="verdict-badge">{verdictText}</div>
+
+      {warnings.length > 0 && (
+        <div className="warn-box" role="alert">
+          <strong>存在无法可靠表达的量，禁止据此放行：</strong>
+          <ul>
+            {warnings.map((w) => (
+              <li key={w.code} data-code={w.code}>
+                {w.message}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
 
       <dl className="metric-grid">
         <div>
@@ -29,22 +64,28 @@ export default function ResultPanel({ result }: Props) {
         </div>
         <div>
           <dt>总重量</dt>
-          <dd title={String(totalWeight)}>{fmt(totalWeight)}</dd>
+          {totalWeight === null ? (
+            <dd className="warn-val" title="合计重量超出数值可表达范围（缺失值）">
+              缺失（溢出，不可审核）
+            </dd>
+          ) : (
+            <dd title={String(totalWeight)}>{fmt(totalWeight)}</dd>
+          )}
         </div>
         <div>
           <dt>最小有符号距离（实际余量）</dt>
           <dd className={stable ? 'pos' : 'neg'} title={String(minDistance)}>
-            {fmt(minDistance)}
+            {distText}
           </dd>
         </div>
         <div>
           <dt>要求安全余量 margin</dt>
-          <dd title={String(margin)}>{fmt(margin)}</dd>
+          <dd title={String(margin)}>{marginDisplay}</dd>
         </div>
         <div>
           <dt>{stable ? '富余' : '短缺量'}</dt>
-          <dd className={stable ? 'pos' : 'neg'} title={String(stable ? minDistance - margin : shortfall)}>
-            {fmt(stable ? minDistance - margin : shortfall)}
+          <dd className={stable ? 'pos' : 'neg'} title={String(stable ? surplus : shortfall)}>
+            {surplusOrShortText}
           </dd>
         </div>
       </dl>
@@ -58,7 +99,7 @@ export default function ResultPanel({ result }: Props) {
           )}, ${fmt(criticalEdge.b.y)})`}
           ）
           <div className="danger-line">
-            实际余量 {fmt(minDistance)} ＜ margin {fmt(margin)}，短缺 {fmt(shortfall)}
+            实际余量 {distText} ＜ margin {marginDisplay}，短缺 {surplusOrShortText}
           </div>
           <div className="danger-note">
             距离为{minDistance < 0 ? '负，重心已越出该支撑边' : '正但不足 margin'}，

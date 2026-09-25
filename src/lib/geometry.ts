@@ -83,13 +83,26 @@ export function signedDistanceToEdge(p: Point, a: Point, b: Point): number {
   return cross(a, b, p) / length;
 }
 
+export interface WeightedCentroidResult {
+  cog: Point;
+  /**
+   * 合计重量；两件合法大重量之和超出 double 可表达范围时为 null。
+   * 重心按最大重量缩放计算，即使合计重量不可表达仍然可靠；
+   * 但未知合计量不得伪装成可审核的正常载荷。
+   */
+  totalWeight: number | null;
+  /** 合计重量是否已溢出（无法可靠表达） */
+  totalWeightOverflowed: boolean;
+}
+
 /**
  * 按重量加权的合成重心。
- * 常规量级直接求和；若中间和非有限（极端输入），改用最大重量缩放，避免溢出。
+ * 常规量级直接求和；若中间和非有限（极端输入），改用最大重量缩放，
+ * 重心仍可可靠求出；缩放后乘回的合计重量若仍非有限，如实返回 null。
  */
 export function weightedCentroid(
   items: { weight: number; center: Point }[],
-): { cog: Point; totalWeight: number } {
+): WeightedCentroidResult {
   let sx = 0;
   let sy = 0;
   let sw = 0;
@@ -100,10 +113,10 @@ export function weightedCentroid(
   }
 
   if (Number.isFinite(sx) && Number.isFinite(sy) && Number.isFinite(sw) && sw > 0) {
-    return { cog: { x: sx / sw, y: sy / sw }, totalWeight: sw };
+    return { cog: { x: sx / sw, y: sy / sw }, totalWeight: sw, totalWeightOverflowed: false };
   }
 
-  // 极端输入兜底：按最大重量缩放
+  // 极端输入兜底：按最大重量缩放（每个归一化重量 ∈ (0,1]，件数 ≤ 200，和恒有限）
   const maxW = items.reduce((m, it) => Math.max(m, it.weight), 0);
   sx = 0;
   sy = 0;
@@ -114,28 +127,123 @@ export function weightedCentroid(
     sy += w * it.center.y;
     sw += w;
   }
-  return { cog: { x: sx / sw, y: sy / sw }, totalWeight: sw * maxW };
+  const rescaled = sw * maxW;
+  if (Number.isFinite(sx) && Number.isFinite(sy) && Number.isFinite(sw) && sw > 0) {
+    return {
+      cog: { x: sx / sw, y: sy / sw },
+      totalWeight: Number.isFinite(rescaled) ? rescaled : null,
+      totalWeightOverflowed: !Number.isFinite(rescaled),
+    };
+  }
+  // 理论上不可达：输入已限定为有限数、坐标 ≤ 1e6
+  return { cog: { x: NaN, y: NaN }, totalWeight: null, totalWeightOverflowed: true };
+}
+
+/** 多边形坐标尺度（绝对值上界，至少为 1） */
+function polygonScale(polygon: Point[]): number {
+  let m = 1;
+  for (const p of polygon) {
+    m = Math.max(m, Math.abs(p.x), Math.abs(p.y));
+  }
+  return m;
+}
+
+/**
+ * 当前坐标尺度下，margin 内缩能否在浮点中与原支撑边可靠区分。
+ * 小于约 8·ε·M 的余量会整体落入表示噪声；此时任何几何内缩都不可信，
+ * 必须显式反馈，而不是让“安全区”静默贴回原边。
+ */
+export function isMarginResolvable(polygon: Point[], margin: number): boolean {
+  if (margin === 0) return true;
+  if (!(margin > 0)) return false;
+  const scale = polygonScale(polygon);
+  if (margin < 8 * Number.EPSILON * scale) return false;
+
+  // 每条边的平移后端点至少要有一个坐标真正发生改变
+  const n = polygon.length;
+  for (let i = 0; i < n; i++) {
+    const a = polygon[i];
+    const b = polygon[(i + 1) % n];
+    const dx = b.x - a.x;
+    const dy = b.y - a.y;
+    const len = Math.hypot(dx, dy);
+    if (len === 0) return false;
+    const nx = -dy / len;
+    const ny = dx / len;
+    const shifted =
+      a.x + nx * margin !== a.x ||
+      a.y + ny * margin !== a.y ||
+      b.x + nx * margin !== b.x ||
+      b.y + ny * margin !== b.y;
+    if (!shifted) return false;
+  }
+  return true;
+}
+
+/** 平移后的边（向多边形内部推进 d） */
+function shiftedEdge(
+  a: Point,
+  b: Point,
+  d: number,
+): { p: Point; dir: Point; ap: Point; bp: Point } {
+  const dx = b.x - a.x;
+  const dy = b.y - a.y;
+  const len = Math.hypot(dx, dy);
+  const nx = -dy / len;
+  const ny = dx / len;
+  const ap = { x: a.x + nx * d, y: a.y + ny * d };
+  const bp = { x: b.x + nx * d, y: b.y + ny * d };
+  return { p: ap, dir: { x: dx, y: dy }, ap, bp };
+}
+
+/** 两条直线（非平行线）的交点 */
+function lineIntersection(p1: Point, d1: Point, p2: Point, d2: Point): Point | null {
+  const denom = cross({ x: 0, y: 0 }, d1, d2);
+  if (denom === 0) return null;
+  const t = cross({ x: 0, y: 0 }, { x: p2.x - p1.x, y: p2.y - p1.y }, d2) / denom;
+  return { x: p1.x + t * d1.x, y: p1.y + t * d1.y };
+}
+
+/**
+ * 直接用相邻平移边的交点构造内缩多边形（单步数值误差，不累积）。
+ * 任一交点落在其它平移半平面之外（内缩区塌缩等）时返回 null，
+ * 交由顺序半平面裁剪处理。
+ */
+function directInset(polygon: Point[], margin: number, tolDist: number): Point[] | null {
+  const n = polygon.length;
+  const edges = polygon.map((a, i) =>
+    shiftedEdge(a, polygon[(i + 1) % n], margin),
+  );
+  const verts: Point[] = [];
+  for (let i = 0; i < n; i++) {
+    const prev = edges[(i - 1 + n) % n];
+    const cur = edges[i];
+    const p = lineIntersection(prev.p, prev.dir, cur.p, cur.dir);
+    if (!p || !Number.isFinite(p.x) || !Number.isFinite(p.y)) return null;
+    // 交点必须满足全部平移半平面（允许 tolDist 的舍入容差）
+    for (const e of edges) {
+      if (signedDistanceToEdge(p, e.ap, e.bp) < -tolDist) return null;
+    }
+    verts.push(p);
+  }
+  return verts;
 }
 
 /**
  * 用一条向多边形内部平移 d 的半平面裁剪凸多边形（Sutherland–Hodgman）。
- * 保留半平面 cross(a,b,p)/|b-a| >= d，即平移边 a'→b' 的左侧。
+ * 保留半平面 cross(ap,bp,p) >= -eps，eps 只取坐标尺度的舍入噪声，
+ * 绝不随 d 放大——否则极小正余量会被容差整体吞掉、原边顶点被误留。
  */
-function clipConvexPolygonByHalfPlane(poly: Point[], a: Point, b: Point, d: number): Point[] {
-  const dx = b.x - a.x;
-  const dy = b.y - a.y;
-  const len = Math.hypot(dx, dy);
-  if (len === 0) return poly;
-  // 平移后的边起点：沿左法线方向移动 d
-  const nx = -dy / len;
-  const ny = dx / len;
-  const ap: Point = { x: a.x + nx * d, y: a.y + ny * d };
-  const bp: Point = { x: b.x + nx * d, y: b.y + ny * d };
+function clipConvexPolygonByHalfPlane(
+  poly: Point[],
+  ap: Point,
+  bp: Point,
+  eps: number,
+): Point[] {
   const side = (p: Point): number => cross(ap, bp, p);
 
   if (poly.length === 0) return poly;
   const out: Point[] = [];
-  const eps = -1e-9 * Math.max(1, len * Math.max(1, Math.abs(d)));
   for (let i = 0; i < poly.length; i++) {
     const cur = poly[i];
     const prev = poly[(i - 1 + poly.length) % poly.length];
@@ -146,9 +254,9 @@ function clipConvexPolygonByHalfPlane(poly: Point[], a: Point, b: Point, d: numb
 
     if (prevIn !== curIn) {
       // 求 prev→cur 与平移边的交点
-      const denom = cross(ap, bp, cur) - cross(ap, bp, prev);
+      const denom = curSide - prevSide;
       if (denom !== 0) {
-        const t = -cross(ap, bp, prev) / denom;
+        const t = -prevSide / denom;
         out.push({
           x: prev.x + t * (cur.x - prev.x),
           y: prev.y + t * (cur.y - prev.y),
@@ -163,15 +271,23 @@ function clipConvexPolygonByHalfPlane(poly: Point[], a: Point, b: Point, d: numb
 /** margin 内缩后的安全区域；margin 为 0 时直接返回原多边形 */
 export function insetPolygon(polygon: Point[], margin: number): Point[] {
   if (margin === 0) return polygon;
+  // 无法在当前坐标尺度下可靠表达的内缩：不伪造贴边的“安全区”
+  if (!isMarginResolvable(polygon, margin)) return [];
+
+  const scale = polygonScale(polygon);
+  const tolDist = 8 * Number.EPSILON * scale;
+  const direct = directInset(polygon, margin, tolDist);
+  if (direct) return direct;
+
+  // 顺序裁剪兜底（大余量塌缩、数值退化等）
   let region = polygon;
   const n = polygon.length;
   for (let i = 0; i < n; i++) {
-    region = clipConvexPolygonByHalfPlane(
-      region,
-      polygon[i],
-      polygon[(i + 1) % n],
-      margin,
-    );
+    const a = polygon[i];
+    const b = polygon[(i + 1) % n];
+    const len = Math.hypot(b.x - a.x, b.y - a.y);
+    const { ap, bp } = shiftedEdge(a, b, margin);
+    region = clipConvexPolygonByHalfPlane(region, ap, bp, -tolDist * len);
     if (region.length === 0) break;
   }
   return region;
@@ -180,10 +296,12 @@ export function insetPolygon(polygon: Point[], margin: number): Point[] {
 /**
  * 对一份合法工作区执行完整稳定性分析。
  * 距离判断、稳定性结论均使用未舍入值；返回结果同时驱动数值面板与 SVG。
+ * 无法可靠表达的量（合计重量溢出、余量低于图形分辨极限）进入 warnings，
+ * 并使 releasable 为 false——计算结论可以照给，但不能据此放行。
  */
 export function analyzeStability(ws: Workspace): StabilityResult {
   const { polygon, items, margin } = ws;
-  const { cog, totalWeight } = weightedCentroid(items);
+  const { cog, totalWeight, totalWeightOverflowed } = weightedCentroid(items);
   const n = polygon.length;
 
   const edges: EdgeInfo[] = [];
@@ -203,7 +321,33 @@ export function analyzeStability(ws: Workspace): StabilityResult {
     e.signedDistance < m.signedDistance ? e : m,
   );
   const minDistance = criticalEdge.signedDistance;
+  // 原始未舍入数值判定：恰在边上（距离 0 = margin 0）算稳定
   const stable = minDistance >= margin;
+
+  const warnings: StabilityResult['warnings'] = [];
+  if (totalWeightOverflowed || totalWeight === null) {
+    warnings.push({
+      code: 'total-weight-overflow',
+      message:
+        `合计重量超出数值可表达范围（两件合法大重量之和溢出），显示为缺失值；` +
+        `重心几何结论仅供参考，本载荷不可作为可审核的正常载荷放行。`,
+    });
+  }
+
+  let safeRegion: Point[];
+  if (margin === 0) {
+    safeRegion = polygon;
+  } else if (!isMarginResolvable(polygon, margin)) {
+    safeRegion = [];
+    warnings.push({
+      code: 'margin-below-resolution',
+      message:
+        `要求余量 ${margin} 小于当前坐标尺度下的图形分辨极限，` +
+        `内缩安全区无法与原支撑边可靠区分，故不绘制；请增大余量或改用更大坐标尺度。`,
+    });
+  } else {
+    safeRegion = insetPolygon(polygon, margin);
+  }
 
   return {
     polygon,
@@ -213,8 +357,10 @@ export function analyzeStability(ws: Workspace): StabilityResult {
     edges,
     minDistance,
     criticalEdge,
-    safeRegion: insetPolygon(polygon, margin),
+    safeRegion,
     stable,
+    releasable: stable && warnings.length === 0,
+    warnings,
     margin,
     shortfall: stable ? 0 : margin - minDistance,
   };

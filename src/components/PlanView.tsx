@@ -14,7 +14,21 @@ interface Props {
  * 均取自同一个 StabilityResult——图与数永远对同一次判断负责。
  */
 export default function PlanView({ result }: Props) {
-  const { polygon, safeRegion, edges, criticalEdge, cog, stable, items } = result;
+  const {
+    polygon,
+    safeRegion,
+    edges,
+    criticalEdge,
+    cog,
+    stable,
+    releasable,
+    warnings,
+    margin,
+    items,
+  } = result;
+  const marginUnresolvable = warnings.some(
+    (w) => w.code === 'margin-below-resolution',
+  );
 
   // 统一包围盒：支撑多边形、全部货物、重心
   const points: Point[] = [...polygon, cog];
@@ -68,7 +82,13 @@ export default function PlanView({ result }: Props) {
     y: criticalEdge.a.y + t * dy,
   };
 
-  const supportStroke = stable ? '#16a34a' : '#dc2626';
+  // 放行状态决定图形着色：可放行=绿；不稳定=红；稳定但存在不可表达量=琥珀（暂缓放行）
+  const supportStroke = !stable ? '#dc2626' : releasable ? '#16a34a' : '#d97706';
+  const supportFill = !stable
+    ? 'rgba(239,68,68,0.10)'
+    : releasable
+      ? 'rgba(34,197,94,0.12)'
+      : 'rgba(217,119,6,0.12)';
 
   return (
     <svg
@@ -79,8 +99,13 @@ export default function PlanView({ result }: Props) {
     >
       <rect x={0} y={0} width={VIEW_W} height={VIEW_H} fill="#0f172a" rx={10} />
 
-      {/* 安全余量内缩区域 */}
-      {safeRegion.length >= 3 && (
+      {/*
+        安全余量内缩区域。
+        只有能与原支撑边可靠区分的内缩才会绘制：
+        margin=0 时本就没有安全区，也不画，绝不把原边冒充成“内缩安全区”；
+        余量低于分辨极限时 safeRegion 为空，并在图面下方显式告警。
+      */}
+      {margin > 0 && safeRegion.length >= 3 && (
         <polygon
           points={safePoints}
           fill="rgba(59,130,246,0.14)"
@@ -89,11 +114,20 @@ export default function PlanView({ result }: Props) {
           strokeDasharray="7 5"
         />
       )}
+      {margin > 0 && safeRegion.length < 3 && (
+        <g className="safe-missing-note">
+          <text x={VIEW_W / 2} y={34} textAnchor="middle" fontSize={14} fill="#fbbf24">
+            {marginUnresolvable
+              ? `余量 ${margin} 低于当前坐标尺度的图形分辨极限：无可绘制的内缩安全区（见数值面板告警）`
+              : 'margin 内缩安全区已塌缩为空'}
+          </text>
+        </g>
+      )}
 
       {/* 支撑多边形 */}
       <polygon
         points={polyPoints}
-        fill={stable ? 'rgba(34,197,94,0.12)' : 'rgba(239,68,68,0.10)'}
+        fill={supportFill}
         stroke={supportStroke}
         strokeWidth={2}
         strokeLinejoin="round"
@@ -187,6 +221,25 @@ export default function PlanView({ result }: Props) {
           重心
         </text>
       </g>
+
+      {/* 无法可靠表达的量在图面底部同样显式反馈，图与数一致 */}
+      {warnings.length > 0 && (
+        <g>
+          {warnings.map((w, i) => (
+            <text
+              key={w.code}
+              x={VIEW_W / 2}
+              y={VIEW_H - 26 + i * 18}
+              textAnchor="middle"
+              fontSize={13}
+              fontWeight={600}
+              fill="#fbbf24"
+            >
+              ⚠ {w.code === 'total-weight-overflow' ? '合计重量溢出缺失：不可作为正常载荷放行' : w.message}
+            </text>
+          ))}
+        </g>
+      )}
     </svg>
   );
 }
