@@ -39,6 +39,11 @@ export interface StabilityResult {
   items: CargoItem[];
   cog: Point;
   totalWeight: number;
+  /**
+   * 合计重量相加溢出（各件合法但总和超出双精度范围）时为 true。
+   * 此时 totalWeight 不可作为审核放行依据，展示层必须给出明确反馈。
+   */
+  totalWeightOverflow: boolean;
   edges: EdgeInfo[];
   /** 重心到各支撑边的最小有符号距离（未舍入） */
   minDistance: number;

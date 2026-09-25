@@ -11,12 +11,30 @@ interface Props {
  * 展示值附带 title 提供原始精度。
  */
 export default function ResultPanel({ result }: Props) {
-  const { stable, cog, totalWeight, minDistance, margin, shortfall, criticalEdge, edges } =
-    result;
+  const {
+    stable,
+    cog,
+    totalWeight,
+    totalWeightOverflow,
+    minDistance,
+    margin,
+    shortfall,
+    criticalEdge,
+    edges,
+  } = result;
 
   return (
     <section className={`panel verdict ${stable ? 'stable' : 'unstable'}`}>
       <div className="verdict-badge">{stable ? 'STABLE' : 'UNSTABLE'}</div>
+
+      {totalWeightOverflow && (
+        <div className="banner err overflow-warning">
+          <strong>合计重量无法可靠表达：</strong>
+          各件重量均为合法有限数，但相加后超出双精度可表示范围（溢出），合计重量未知。
+          重心与稳定性结论由缩放重量计算、几何上仍然有效，但合计重量缺失，
+          <strong>本结果不可作为审核放行依据</strong>。
+        </div>
+      )}
 
       <dl className="metric-grid">
         <div>
@@ -29,7 +47,13 @@ export default function ResultPanel({ result }: Props) {
         </div>
         <div>
           <dt>总重量</dt>
-          <dd title={String(totalWeight)}>{fmt(totalWeight)}</dd>
+          {totalWeightOverflow ? (
+            <dd className="neg" title="各件重量合法，但相加溢出，无法可靠表达">
+              未知（溢出）
+            </dd>
+          ) : (
+            <dd title={String(totalWeight)}>{fmt(totalWeight)}</dd>
+          )}
         </div>
         <div>
           <dt>最小有符号距离（实际余量）</dt>

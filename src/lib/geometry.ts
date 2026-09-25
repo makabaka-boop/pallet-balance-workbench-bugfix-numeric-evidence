@@ -83,13 +83,26 @@ export function signedDistanceToEdge(p: Point, a: Point, b: Point): number {
   return cross(a, b, p) / length;
 }
 
+export interface WeightedCentroidResult {
+  cog: Point;
+  totalWeight: number;
+  /**
+   * 各件重量均为合法有限数、但合计超出双精度可表示范围（相加溢出）时为 true。
+   * 此时 totalWeight 为 Infinity：重心由缩放重量计算、几何上仍有效，
+   * 但合计重量无法可靠表达，调用方必须给出明确反馈，
+   * 不能把未知合计量伪装成可审核的正常载荷。
+   */
+  totalWeightOverflow: boolean;
+}
+
 /**
  * 按重量加权的合成重心。
  * 常规量级直接求和；若中间和非有限（极端输入），改用最大重量缩放，避免溢出。
+ * 合计重量是否溢出通过 totalWeightOverflow 显式上报。
  */
 export function weightedCentroid(
   items: { weight: number; center: Point }[],
-): { cog: Point; totalWeight: number } {
+): WeightedCentroidResult {
   let sx = 0;
   let sy = 0;
   let sw = 0;
@@ -100,10 +113,10 @@ export function weightedCentroid(
   }
 
   if (Number.isFinite(sx) && Number.isFinite(sy) && Number.isFinite(sw) && sw > 0) {
-    return { cog: { x: sx / sw, y: sy / sw }, totalWeight: sw };
+    return { cog: { x: sx / sw, y: sy / sw }, totalWeight: sw, totalWeightOverflow: false };
   }
 
-  // 极端输入兜底：按最大重量缩放
+  // 极端输入兜底：按最大重量缩放，重心仍可精确表达
   const maxW = items.reduce((m, it) => Math.max(m, it.weight), 0);
   sx = 0;
   sy = 0;
@@ -114,12 +127,20 @@ export function weightedCentroid(
     sy += w * it.center.y;
     sw += w;
   }
-  return { cog: { x: sx / sw, y: sy / sw }, totalWeight: sw * maxW };
+  const totalWeight = sw * maxW;
+  return {
+    cog: { x: sx / sw, y: sy / sw },
+    totalWeight,
+    totalWeightOverflow: !Number.isFinite(totalWeight),
+  };
 }
 
 /**
  * 用一条向多边形内部平移 d 的半平面裁剪凸多边形（Sutherland–Hodgman）。
  * 保留半平面 cross(a,b,p)/|b-a| >= d，即平移边 a'→b' 的左侧。
+ * 判定不做外扩容差：安全区只允许等于真实内缩区域。若保留向外容差，
+ * 极小正余量（如边长 100、margin 1e-12）下原支承边会被留在安全区内，
+ * 图形随即与 minDistance >= margin 的数值判定相互矛盾。
  */
 function clipConvexPolygonByHalfPlane(poly: Point[], a: Point, b: Point, d: number): Point[] {
   const dx = b.x - a.x;
@@ -135,20 +156,19 @@ function clipConvexPolygonByHalfPlane(poly: Point[], a: Point, b: Point, d: numb
 
   if (poly.length === 0) return poly;
   const out: Point[] = [];
-  const eps = -1e-9 * Math.max(1, len * Math.max(1, Math.abs(d)));
   for (let i = 0; i < poly.length; i++) {
     const cur = poly[i];
     const prev = poly[(i - 1 + poly.length) % poly.length];
     const curSide = side(cur);
     const prevSide = side(prev);
-    const curIn = curSide >= eps;
-    const prevIn = prevSide >= eps;
+    const curIn = curSide >= 0;
+    const prevIn = prevSide >= 0;
 
     if (prevIn !== curIn) {
       // 求 prev→cur 与平移边的交点
-      const denom = cross(ap, bp, cur) - cross(ap, bp, prev);
+      const denom = curSide - prevSide;
       if (denom !== 0) {
-        const t = -cross(ap, bp, prev) / denom;
+        const t = -prevSide / denom;
         out.push({
           x: prev.x + t * (cur.x - prev.x),
           y: prev.y + t * (cur.y - prev.y),
@@ -183,7 +203,7 @@ export function insetPolygon(polygon: Point[], margin: number): Point[] {
  */
 export function analyzeStability(ws: Workspace): StabilityResult {
   const { polygon, items, margin } = ws;
-  const { cog, totalWeight } = weightedCentroid(items);
+  const { cog, totalWeight, totalWeightOverflow } = weightedCentroid(items);
   const n = polygon.length;
 
   const edges: EdgeInfo[] = [];
@@ -210,6 +230,7 @@ export function analyzeStability(ws: Workspace): StabilityResult {
     items,
     cog,
     totalWeight,
+    totalWeightOverflow,
     edges,
     minDistance,
     criticalEdge,

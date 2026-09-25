@@ -77,9 +77,17 @@ export function resolveForm(polygon: Workspace['polygon'], form: FormState): Res
   return { ok: true, result: analyzeStability(workspace) };
 }
 
-/** 展示用：最多保留 6 位小数；title 属性另行提供未舍入原值 */
+/**
+ * 展示用：最多保留 6 位小数；title 属性另行提供未舍入原值。
+ * 非零但小于展示精度的值（如 margin 1e-12）改用科学计数法明确表达——
+ * 绝不能把非零阈值/差额显示成 0，否则面板会出现“实际余量 0 ＜ 要求 0”
+ * 的假矛盾，误导放行判断。
+ */
 export function fmt(n: number, digits = 6): string {
   if (!Number.isFinite(n)) return '—';
   const rounded = Number(n.toFixed(digits));
+  if (rounded === 0 && n !== 0) {
+    return n.toExponential(2);
+  }
   return String(rounded);
 }

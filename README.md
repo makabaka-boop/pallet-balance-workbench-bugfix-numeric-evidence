@@ -15,6 +15,9 @@
   - 计算重心到每条支撑边的**有符号距离**（逆时针多边形内部为正），取最小值。
   - `minDistance >= margin` 显示 **STABLE**；否则显示 **UNSTABLE**，并给出最危险边、实际余量、短缺量（重心越出边时距离为负）。
   - 边界比较直接使用未舍入浮点值（恰在边界上算稳定）；面板仅在展示层保留 6 位小数，悬停可见原值。
+  - **极小正余量一致内缩**：margin 安全区按精确半平面裁剪（不做外扩容差），边长 100、margin 1e-12 时安全区也不会贴回原支承边，图形与数值判定不会互相矛盾。
+  - **非零小值不显示成 0**：小于 6 位小数展示精度的非零量（如 1e-12 的余量/短缺）自动改用科学计数法，不会出现“实际余量 0 ＜ 要求 0”的假矛盾。
+  - **合计重量溢出显式上报**：各件重量合法但相加溢出（如两件 1e308）时，重心与稳定性结论仍由缩放重量给出，但 `totalWeightOverflow` 置位，面板显示“未知（溢出）”并警示**不可作为审核放行依据**，绝不把未知合计量伪装成正常载荷。
 - **SVG 俯视图**：支撑区、margin 内缩安全区（半平面裁剪）、货物（半径 ∝ √重量）、合成重心、最危险边（红色粗边）及重心到该边的实际余量垂线，全部取自同一个 `StabilityResult`。
 - **编辑即撤销旧结论**：任何非法输入都会让数值面板与图形同时进入「结论已撤销 / 无结论」状态，不会残留过期的 STABLE/UNSTABLE。
 
@@ -23,7 +26,7 @@
 ```bash
 npm install
 npm run dev       # http://localhost:5173，纯前端、无后端、无外部网络请求
-npm run test      # Vitest（35 个几何/校验用例）
+npm run test      # Vitest（47 个几何/校验/验收用例）
 npm run build     # 类型检查 + 产物到 dist/
 ```
 
@@ -55,9 +58,10 @@ docker compose up --build
 
 | 文件 | 内容 |
 | --- | --- |
-| `src/lib/geometry.ts` | 严格凸/逆时针校验、有符号距离、加权重心、半平面内缩、`analyzeStability` 单一结果源 |
+| `src/lib/geometry.ts` | 严格凸/逆时针校验、有符号距离、加权重心（含溢出标记）、半平面精确内缩、`analyzeStability` 单一结果源 |
 | `src/lib/parse.ts` | 导入数据严格校验（未知字段、范围、件数、整批拒绝） |
-| `src/lib/form.ts` | 编辑表单解析，非法即撤销结论；展示格式化 |
+| `src/lib/form.ts` | 编辑表单解析，非法即撤销结论；展示格式化（非零小值科学计数法） |
 | `src/components/PlanView.tsx` | 与数值面板共用 `StabilityResult` 的 SVG 俯视图 |
-| `src/components/ResultPanel.tsx` | STABLE/UNSTABLE、最危险边、实际余量、短缺量 |
+| `src/components/ResultPanel.tsx` | STABLE/UNSTABLE、最危险边、实际余量、短缺量、合计重量溢出警示 |
 | `src/lib/geometry.test.ts` | 凸性/退化/自交、距离符号、加权重心、内缩塌缩、边界稳定性、整批拒绝等用例 |
+| `src/lib/acceptance.test.ts` | 验收：极小正余量内缩、边界重心图数一致、微小短缺指标呈现、大重量溢出标记 |
